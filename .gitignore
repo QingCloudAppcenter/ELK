@@ -1,2 +1,5 @@
-.idea
-layout/standard/elk.tar.gz
+files/tmp
+/make.retry
+
+tests/node_modules/
+tests/package-lock.json

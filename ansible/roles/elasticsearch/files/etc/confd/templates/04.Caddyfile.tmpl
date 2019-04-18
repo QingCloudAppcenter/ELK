@@ -1,0 +1,37 @@
+cat > /opt/app/conf/caddy/Caddyfile << CADDYFILE_EOF
+{{ getv "/host/ip" }}:80 {
+  root /data/elasticsearch
+  gzip
+  browse
+  tls off
+  log /data/caddy/logs/access.log {
+    rotate_age 7
+    rotate_keep 5
+    rotate_size 2
+  }
+
+  upload /analysis {
+    yes_without_tls
+    to "/data/elasticsearch/analysis"
+  }
+}
+
+{{ with getv "/cluster/endpoints/reserved_ips/esvip/value" -}}
+{{ . }}:80 {
+  log /data/caddy/logs/es.access.log {
+    rotate_age 7
+    rotate_keep 100
+    rotate_size 1
+  }
+
+  errors /data/caddy/logs/es.error.log {
+    rotate_age 7
+    rotate_keep 100
+    rotate_size 1
+  }
+
+  proxy / {{ range (or (getvs "/hosts/es_master_node/*/ip") (getvs "/hosts/es_node/*/ip")) }}{{ . }}:9200 {{ end }}
+}
+{{- end }}
+CADDYFILE_EOF
+

@@ -1,0 +1,1 @@
+roles/utils/files/etc/confd/templates/01.header.sh.tmpl roles/utils/files/etc/confd/templates/02.app.env.tmpl roles/kibana/files/etc/confd/templates/01.kibana.yml.tmpl roles/kibana/files/etc/confd/templates/02.cerebro.conf.tmpl roles/kibana/files/etc/confd/templates/03.sql.init.js.tmpl

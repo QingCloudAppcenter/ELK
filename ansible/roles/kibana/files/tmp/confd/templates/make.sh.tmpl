@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+
+set -e
+
+{{- $rolesMap := map "es_node" "elasticsearch-data" "es_master_node" "elasticsearch-master" "kbn_node" "kibana" "lst_node" "logstash" }}
+{{- $myRole := index $rolesMap (getv "/host/role") }}
+{{- $mySid := getv "/host/sid" }}
+
+updateAndCompareFile() {
+  cat > "$1.new" -
+  local changes=$(diff -N --unchanged-line-format= --new-line-format="%L" "$1" "$1.new")
+  mv "$1.new" "$1"
+  echo "$changes"
+}
+
+map() {
+  local func=$1
+  local args="${@:2}"
+  for arg in $args; do
+    echo $($func $arg)
+  done
+}
+
+generatePassword() {
+  < /dev/urandom tr -dc 'A-Za-z0-9!"#$%&()*+,-./:;<=>?@[\]^_`{|}~' | head -c ${1:-24}
+}
+
+
+cat > /opt/app/bin/.env << APP_ENV_EOF
+MY_ROLE={{ $myRole }}
+
+{{- range gets "/env/appctl.*" }}
+{{ replace (base .Key) "." "_" -1 | toUpper }}={{ .Value }}
+{{- end }}
+
+{{- if eq $myRole "kibana" }}
+{{- range gets "/env/enable_*" }}
+{{ base .Key | toUpper }}={{ .Value }}
+{{- end }}
+{{- end }}
+APP_ENV_EOF
+
+
+cat > /opt/app/conf/kibana/kibana.yml << KIBANA_YML_EOF
+server.port: 5601
+server.host: {{ getv "/host/ip" }}
+server.basePath: "{{ getv "/env/server.basePath" "" }}"
+server.rewriteBasePath: {{ getv "/env/server.rewriteBasePath" "false" }}
+server.maxPayloadBytes: 1048576
+server.name: node-{{ getv "/host/node_id" }}
+elasticsearch.hosts: [ http://{{ getv "/cluster/endpoints/reserved_ips/esvip/value" }}:9200 ]
+elasticsearch.preserveHost: true
+kibana.index: ".kibana"
+kibana.defaultAppId: "home"
+elasticsearch.username: "user"
+elasticsearch.password: "pass"
+server.ssl.enabled: false
+server.ssl.certificate: /path/to/your/server.crt
+server.ssl.key: /path/to/your/server.key
+elasticsearch.pingTimeout: 1500
+elasticsearch.requestTimeout: 30000
+elasticsearch.requestHeadersWhitelist: [ authorization ]
+elasticsearch.customHeaders: {}
+elasticsearch.shardTimeout: 30000
+elasticsearch.startupTimeout: 5000
+elasticsearch.logQueries: false
+pid.file: /var/run/kibana/kibana.pid
+logging.dest: /data/kibana/logs/kibana.log
+logging.silent: false
+logging.quiet: false
+logging.verbose: false
+ops.interval: 5000
+i18n.locale: "zh-CN"
+KIBANA_YML_EOF
+
+
+cat > /opt/app/conf/cerebro/cerebro.conf << CEREBRO_CONF_EOF
+secret = "$(generatePassword)"
+basePath = "/"
+pidfile.path=/var/run/cerebro/cerebro.pid
+rest.history.size = 50 // defaults to 50 if not specified
+data.path = "/data/cerebro/data/cerebro.db"
+
+es = {
+  gzip = true
+}
+
+auth = {
+}
+
+hosts = [{
+  host = "{{ range $i, $ip := getvs "/hosts/es_node/*/ip" }}{{ if eq $i 0 }}http://{{ $ip }}:9200{{ end }}{{ end }}"
+  name = "{{ getv "/cluster/cluster_id" }}"
+  # auth = {
+  #   username = "username"
+  #   password = "secret-password"
+  # }
+}]
+CEREBRO_CONF_EOF
+
+
+cat > /opt/elasticsearch-sql/current/_site/init.js << ES_SQL_INIT_JS_EOF
+localStorage.getItem('lasturl') || localStorage.setItem('lasturl', 'http://{{ getv "/host/ip" }}:9200/');
+ES_SQL_INIT_JS_EOF
+
+
+cat > /opt/app/conf/caddy/Caddyfile << LS_CADDYFILE_EOF
+{{ getv "/host/ip" }}:80 {
+  root /data/logstash
+  gzip
+  browse
+  tls off
+  log /data/caddy/logs/access.log {
+    rotate_age 7
+    rotate_keep 5
+    rotate_size 2
+  }
+
+  upload /dicts {
+    yes_without_tls
+    to "/data/logstash/dicts"
+  }
+}
+LS_CADDYFILE_EOF
+
+
+cat > /etc/nginx/conf.d/es-proxy.conf << ES_PROXY_EOF
+upstream es {
+  {{- range getvs "/hosts/es_node/*/ip" }}
+  server {{ . }}:9200;
+  {{- end }}
+}
+
+server {
+  listen 9200 es_proxy;
+
+  client_max_body_size {{ getv "/env/nginx_client_max_body_size" }};
+
+  location / {
+    proxy_pass http://es;
+  }
+}
+ES_PROXY_EOF

@@ -1,0 +1,34 @@
+---
+- name: Common setup
+  hosts: all
+  roles:
+    - common
+
+- name: ES setup
+  hosts: elasticsearch
+  roles:
+    - elasticsearch
+    - caddy
+
+- name: LS setup
+  hosts: logstash
+  roles:
+    - logstash
+    - caddy
+
+- name: Kibana setup
+  hosts: kibana
+  roles:
+    - kibana
+    - caddy
+    - cerebro
+    - elastichd
+    - elasticsearch-head
+    - elasticsearch-hq
+    - elasticsearch-sql
+    - nginx
+
+- name: Cleanup
+  hosts: all
+  roles:
+    - cleanup

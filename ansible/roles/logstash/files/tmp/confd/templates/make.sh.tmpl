@@ -1,0 +1,283 @@
+#!/usr/bin/env bash
+
+set -e
+
+{{- $rolesMap := map "es_node" "elasticsearch-data" "es_master_node" "elasticsearch-master" "kbn_node" "kibana" "lst_node" "logstash" }}
+{{- $myRole := index $rolesMap (getv "/host/role") }}
+{{- $mySid := getv "/host/sid" }}
+
+updateAndCompareFile() {
+  cat > "$1.new" -
+  local changes=$(diff -N --unchanged-line-format= --new-line-format="%L" "$1" "$1.new")
+  mv "$1.new" "$1"
+  echo "$changes"
+}
+
+map() {
+  local func=$1
+  local args="${@:2}"
+  for arg in $args; do
+    echo $($func $arg)
+  done
+}
+
+generatePassword() {
+  < /dev/urandom tr -dc 'A-Za-z0-9!"#$%&()*+,-./:;<=>?@[\]^_`{|}~' | head -c ${1:-24}
+}
+
+
+cat > /opt/app/bin/.env << APP_ENV_EOF
+MY_ROLE={{ $myRole }}
+
+{{- range gets "/env/appctl.*" }}
+{{ replace (base .Key) "." "_" -1 | toUpper }}={{ .Value }}
+{{- end }}
+
+{{- if eq $myRole "kibana" }}
+{{- range gets "/env/enable_*" }}
+{{ base .Key | toUpper }}={{ .Value }}
+{{- end }}
+{{- end }}
+APP_ENV_EOF
+
+
+cat > /opt/app/conf/logstash/logstash.yml << LS_YML_EOF
+node.name: {{ getv "/cluster/cluster_id" }}-{{ getv "/host/sid" }}
+path.config: /data/logstash/config/logstash.conf
+path.data: /data/logstash/data
+path.queue: /data/logstash/queue
+path.logs: /data/logstash/logs
+path.plugins: [/data/logstash/plugins]
+LS_YML_EOF
+
+
+halfMemory=$(free -m | awk '$1=="Mem:" { print rshift($2, 1) }')
+cat > /opt/app/conf/logstash/jvm.options << LS_JVM_EOF
+-Xms${halfMemory}m
+-Xmx${halfMemory}m
+
+-XX:+UseParNewGC
+-XX:+UseConcMarkSweepGC
+-XX:CMSInitiatingOccupancyFraction=75
+-XX:+DisableExplicitGC
+-XX:+UseCMSInitiatingOccupancyOnly
+
+-Duser.language=zh
+-Duser.country=CN
+#-Duser.variant=
+
+-Djava.io.tmpdir=/tmp/logstash
+
+-Djava.awt.headless=true
+
+-Dfile.encoding=UTF-8
+
+#-Djna.nosys=true
+
+-Djruby.compile.invokedynamic=true
+-Djruby.jit.threshold=0
+
+-XX:ErrorFile=/data/logstash/logs/hs_err_pid%p.log
+
+{{- if eq (getv "/env/enable_heap_dump" "false") "true"}}
+-XX:+HeapDumpOnOutOfMemoryError
+-XX:HeapDumpPath={{ getv "/env/heap_dump_path" "/data/logstash/dump" }}
+{{- end }}
+
+#-XX:+PrintGCDetails
+#-XX:+PrintGCTimeStamps
+#-XX:+PrintGCDateStamps
+#-XX:+PrintClassHistogram
+#-XX:+PrintTenuringDistribution
+#-XX:+PrintGCApplicationStoppedTime
+
+-Xloggc:/data/logstash/logs/gc.log
+-XX:+UseGCLogFileRotation
+-XX:NumberOfGCLogFiles=5
+-XX:GCLogFileSize=2m
+
+-Djava.security.egd=file:/dev/urandom
+LS_JVM_EOF
+
+
+confDir=/data/logstash/config
+lsConf=$confDir/logstash.conf
+lsConfLock=$lsConf.lock
+lsConfSample=/opt/app/conf/logstash/sample.conf
+
+cat > $lsConfSample << LS_MAIN_CONF_EOF
+input {
+  {{ getv "/env/input_conf_content" }}
+}
+
+filter {
+  {{ getv "/env/filter_conf_content" }}
+}
+
+output {
+  elasticsearch {
+    hosts => [ {{ range $i, $ip := getvs "/hosts/es_node/*/ip" }}{{ if $i }}, {{ end }}"http://{{ $ip }}:9200"{{ end }} ]
+    {{ getv "/env/output_es_content" }}
+    # index => "%{[@metadata][beat]}-%{[@metadata][version]}-%{+YYYY.MM.dd}"
+    # user => "elastic"
+    # password => "changeme"
+  }
+
+  {{ getv "/env/output_conf_content" }}
+}
+LS_MAIN_CONF_EOF
+
+if [ ! -f "$lsConf.lock" ]; then
+  mkdir -p $confDir
+  cat $lsConfSample > $lsConf
+fi
+
+cat > /opt/app/conf/caddy/Caddyfile << LS_CADDYFILE_EOF
+{{ getv "/host/ip" }}:80 {
+  root /data/elasticsearch
+  gzip
+  browse
+  tls off
+  log /data/caddy/logs/access.log {
+    rotate_age 7
+    rotate_keep 5
+    rotate_size 2
+  }
+
+  upload /dicts {
+    yes_without_tls
+    to "/data/elasticsearch/dicts"
+  }
+}
+LS_CADDYFILE_EOF
+
+
+cat > /opt/logstash/current/Gemfile << LS_GEMFILE_EOF
+# This is a Logstash generated Gemfile.
+# If you modify this file manually all comments and formatting will be lost.
+
+source "https://rubygems.org"
+gem "logstash-core", :path => "./logstash-core"
+gem "logstash-core-plugin-api", :path => "./logstash-core-plugin-api"
+gem "paquet", "~> 0.2.0"
+gem "ruby-progressbar", "~> 1.8.1"
+gem "builder", "~> 3.2.2"
+gem "file-dependencies", "0.1.6"
+gem "ci_reporter_rspec", "1.0.0", :group => :development
+gem "simplecov", :group => :development
+gem "tins", "1.6", :group => :development
+gem "rspec", "~> 3.1.0", :group => :development
+gem "logstash-devutils", :group => :development
+gem "benchmark-ips", :group => :development
+gem "octokit", "3.8.0", :group => :build
+gem "stud", "~> 0.0.22", :group => :build
+gem "fpm", "~> 1.3.3", :group => :build
+gem "rubyzip", "~> 1.1.7", :group => :build
+gem "gems", "~> 0.8.3", :group => :build
+gem "rack", "1.6.6"
+gem "rack-test", :require => "rack/test", :group => :development
+gem "flores", "~> 0.0.6", :group => :development
+gem "term-ansicolor", "~> 1.3.2", :group => :development
+gem "docker-api", "1.31.0", :group => :development
+gem "rest-client", "1.8.0", :group => :development
+gem "pleaserun", "~>0.0.28"
+gem "logstash-input-heartbeat"
+gem "logstash-codec-collectd"
+gem "logstash-output-xmpp"
+gem "logstash-codec-cef"
+gem "logstash-codec-dots"
+gem "logstash-codec-edn"
+gem "logstash-codec-edn_lines"
+gem "logstash-codec-fluent"
+gem "logstash-codec-es_bulk"
+gem "logstash-codec-graphite"
+gem "logstash-codec-json"
+gem "logstash-codec-json_lines"
+gem "logstash-codec-line"
+gem "logstash-codec-msgpack"
+gem "logstash-codec-multiline"
+gem "logstash-codec-netflow", "~> 3.4.0"
+gem "logstash-codec-plain"
+gem "logstash-codec-rubydebug"
+gem "logstash-filter-clone"
+gem "logstash-filter-csv"
+gem "logstash-filter-date"
+gem "logstash-filter-dns"
+gem "logstash-filter-drop"
+gem "logstash-filter-fingerprint"
+gem "logstash-filter-geoip", "~> 4.2.0"
+gem "logstash-filter-grok"
+gem "logstash-filter-json"
+gem "logstash-filter-kv"
+gem "logstash-filter-metrics"
+gem "logstash-filter-mutate"
+gem "logstash-filter-ruby"
+gem "logstash-filter-sleep"
+gem "logstash-filter-split"
+gem "logstash-filter-syslog_pri"
+gem "logstash-filter-throttle"
+gem "logstash-filter-urldecode"
+gem "logstash-filter-useragent", "~> 3.1.0"
+gem "logstash-filter-uuid"
+gem "logstash-filter-xml"
+gem "logstash-input-couchdb_changes"
+gem "logstash-input-elasticsearch"
+gem "logstash-input-exec"
+gem "logstash-input-file"
+gem "logstash-input-ganglia"
+gem "logstash-input-gelf"
+gem "logstash-input-generator"
+gem "logstash-input-graphite"
+gem "logstash-input-http"
+gem "logstash-input-http_poller"
+gem "logstash-input-imap"
+gem "logstash-input-irc"
+gem "logstash-input-jdbc"
+gem "logstash-input-log4j"
+gem "logstash-input-lumberjack"
+gem "logstash-input-pipe"
+gem "logstash-input-rabbitmq"
+gem "logstash-input-redis"
+gem "logstash-input-s3"
+gem "logstash-input-snmptrap"
+gem "logstash-input-sqs"
+gem "logstash-input-stdin"
+gem "logstash-input-syslog"
+gem "logstash-input-tcp", "~> 4.1.0"
+gem "logstash-input-twitter"
+gem "logstash-input-udp"
+gem "logstash-input-unix"
+gem "logstash-input-xmpp"
+gem "logstash-input-kafka", "~> 5"
+gem "logstash-input-beats", "~> 3.0", ">= 3.1.18"
+gem "logstash-output-cloudwatch"
+gem "logstash-output-csv"
+gem "logstash-output-elasticsearch"
+gem "logstash-output-file"
+gem "logstash-output-graphite"
+gem "logstash-output-http"
+gem "logstash-output-irc"
+gem "logstash-output-kafka", "~> 5"
+gem "logstash-output-nagios"
+gem "logstash-output-null"
+gem "logstash-output-pagerduty"
+gem "logstash-output-pipe"
+gem "logstash-output-rabbitmq"
+gem "logstash-output-redis"
+gem "logstash-output-s3"
+gem "logstash-output-sns"
+gem "logstash-output-sqs"
+gem "logstash-output-statsd"
+gem "logstash-output-stdout"
+gem "logstash-output-tcp"
+gem "logstash-output-udp"
+gem "logstash-output-webhdfs"
+gem "logstash-filter-dissect"
+gem "logstash-input-dead_letter_queue"
+gem "logstash-input-qingstor"
+gem "logstash-output-qingstor"
+
+{{ getv "/env/gemfile_append_content" }}
+LS_GEMFILE_EOF
+
+

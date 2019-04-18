@@ -1,0 +1,12 @@
+[elasticsearch]
+# 192.168.2.4
+
+[logstash]
+192.168.2.5
+
+[kibana]
+# 192.168.2.6
+
+[all:vars]
+ansible_connection=ssh
+ansible_python_interpreter=/usr/bin/python3
